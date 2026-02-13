@@ -1,4 +1,6 @@
 """Authentication and authorization."""
+import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
@@ -10,6 +12,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES
+
+logger = logging.getLogger(__name__)
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -26,6 +30,30 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     """Hash a password."""
     return pwd_context.hash(password)
+
+
+def validate_password_strength(password: str) -> tuple[bool, str]:
+    """
+    Validate password strength for user registration.
+
+    Requirements:
+    - Minimum 8 characters
+    - At least one uppercase letter
+    - At least one lowercase letter
+    - At least one digit
+    - At least one non-alphanumeric character
+    """
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters long"
+    if not re.search(r"[A-Z]", password):
+        return False, "Password must include at least one uppercase letter"
+    if not re.search(r"[a-z]", password):
+        return False, "Password must include at least one lowercase letter"
+    if not re.search(r"\d", password):
+        return False, "Password must include at least one digit"
+    if not re.search(r"[^A-Za-z0-9]", password):
+        return False, "Password must include at least one special character"
+    return True, "ok"
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -115,8 +143,6 @@ def get_current_user_optional(
         return None
     except Exception as e:
         # Log unexpected errors but still fail gracefully
-        import logging
-        logger = logging.getLogger(__name__)
         logger.warning(f"Unexpected error in get_current_user_optional: {e}")
         return None
 
@@ -136,6 +162,10 @@ def authenticate_user(db: Session, username: str, password: str) -> Optional[Use
 
 def create_user(db: Session, username: str, password: str, name: str, role: str = "reviewer") -> User:
     """Create a new user."""
+    is_valid, message = validate_password_strength(password)
+    if not is_valid:
+        raise ValueError(message)
+
     hashed_password = get_password_hash(password)
     
     user = User(

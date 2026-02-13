@@ -97,6 +97,32 @@ def get_document_count(
 # FILE PATH UTILITIES
 # ============================================================================
 
+def _resolve_safe_document_path(local_file_path: str) -> Optional[Path]:
+    """
+    Resolve and validate that a document path is within RAW_STORAGE_DIR.
+
+    Supports both absolute paths and storage-relative paths.
+    """
+    try:
+        candidate = Path(local_file_path)
+        if not candidate.is_absolute():
+            candidate = RAW_STORAGE_DIR / candidate
+
+        resolved_file = candidate.resolve()
+        resolved_base = RAW_STORAGE_DIR.resolve()
+
+        if not resolved_file.is_relative_to(resolved_base):
+            logger.warning(
+                f"Rejected unsafe document path outside storage root: {local_file_path}"
+            )
+            return None
+
+        return resolved_file
+    except Exception as e:
+        logger.error(f"Failed to resolve document path '{local_file_path}': {e}")
+        return None
+
+
 def get_document_file_path(document: Document) -> Optional[Path]:
     """
     Get the actual file path for a document.
@@ -107,7 +133,9 @@ def get_document_file_path(document: Document) -> Optional[Path]:
     IMPROVEMENT: Validates file existence and logs missing files.
     """
     try:
-        file_path = Path(document.local_file_path)
+        file_path = _resolve_safe_document_path(document.local_file_path)
+        if file_path is None:
+            return None
         
         if file_path.exists() and file_path.is_file():
             return file_path

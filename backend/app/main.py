@@ -3,6 +3,7 @@ import logging
 import signal
 import sys
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,12 +11,19 @@ from fastapi.responses import JSONResponse
 
 from app.config import (
     CORS_ORIGINS,
+    RAW_STORAGE_DIR,
     LOG_LEVEL,
     LOG_FORMAT,
     IS_PRODUCTION,
     validate_configuration,
 )
-from app.database import init_db, check_database_health, dispose_engine
+from app.database import (
+    init_db,
+    check_database_health,
+    dispose_engine,
+    get_pool_status,
+)
+from app.services import crawl_service
 from app.routers import (
     auth_router,
     crawl_router,
@@ -140,16 +148,44 @@ def health():
             content={"status": "shutting_down"},
         )
     try:
-        if check_database_health():
-            return {"status": "healthy", "database": "connected", "version": "6.0.0"}
+        db_healthy = check_database_health()
+        pool_stats = get_pool_status()
+        active_crawls = crawl_service.get_active_crawl_count()
+        health_data = {
+            "status": "healthy" if db_healthy else "degraded",
+            "version": "6.0.0",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "database": {
+                "connected": db_healthy,
+                "pool": pool_stats,
+            },
+            "services": {
+                "crawl": {
+                    "active": active_crawls,
+                    "capacity": crawl_service.MAX_CONCURRENT_CRAWLS,
+                }
+            },
+            "storage": {
+                "available": RAW_STORAGE_DIR.exists(),
+                "path": str(RAW_STORAGE_DIR),
+            },
+        }
+
+        if db_healthy:
+            return health_data
+
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "unhealthy", "database": "unreachable"},
+            content=health_data,
         )
     except Exception as e:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"status": "unhealthy", "error": str(e)},
+            content={
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
         )
 
 

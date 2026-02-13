@@ -13,7 +13,6 @@ FIXES APPLIED:
 - validate_configuration() no longer calls sys.exit() directly; raises instead
 """
 import os
-import sys
 import logging
 from pathlib import Path
 from typing import List
@@ -44,10 +43,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     if IS_PRODUCTION:
         logger.critical("DATABASE_URL environment variable is required in production")
-        sys.exit(1)
+        raise RuntimeError("DATABASE_URL not set in production")
     else:
         DATABASE_URL = "mysql+pymysql://root:password@db:3306/policycheck"
-        logger.warning("Using default DATABASE_URL for development")
+        logger.critical(
+            "Using default DATABASE_URL for development (INSECURE default credentials). "
+            "Set DATABASE_URL explicitly before production deployment."
+        )
 
 # Connection pool settings
 DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
@@ -66,11 +68,14 @@ if not SECRET_KEY:
             "SECRET_KEY environment variable is REQUIRED in production! "
             "Generate with: python -c 'import secrets; print(secrets.token_urlsafe(32))'"
         )
-        sys.exit(1)
+        raise RuntimeError("SECRET_KEY not set in production")
     else:
         # Must be >= 32 characters to pass startup validation
         SECRET_KEY = "dev-insecure-key-DO-NOT-USE-IN-PRODUCTION-PADDING"
-        logger.warning("Using insecure SECRET_KEY for development - DO NOT USE IN PRODUCTION")
+        logger.critical(
+            "Using insecure SECRET_KEY for development. "
+            "Tokens are not safe for production."
+        )
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))  # 24 hours

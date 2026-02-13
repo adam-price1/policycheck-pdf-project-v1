@@ -749,6 +749,36 @@ def crawl_domain(
 # MAIN CRAWL EXECUTION ENGINE
 # ============================================================================
 
+def _mark_crawl_failed(session_id: int, reason: str) -> None:
+    """Best-effort failure state persistence for crawl sessions."""
+    from app.database import get_db_context
+
+    try:
+        with get_db_context() as db:
+            session = db.query(CrawlSession).filter(CrawlSession.id == session_id).first()
+            if not session:
+                logger.error(
+                    f"[Crawl {session_id}] Unable to mark failed; session not found "
+                    f"(reason={reason})"
+                )
+                return
+
+            session.status = "failed"
+            session.completed_at = datetime.now(timezone.utc)
+            session.errors_count = (session.errors_count or 0) + 1
+            db.commit()
+
+            logger.info(
+                f"[Crawl {session_id}] Marked session as failed "
+                f"(reason={reason}, errors_count={session.errors_count})"
+            )
+    except Exception:
+        logger.error(
+            f"[Crawl {session_id}] Failed to persist failed status (reason={reason})",
+            exc_info=True,
+        )
+
+
 def run_crawl_session(session_id: int):
     """
     Execute a crawl session with own DB connection.
@@ -996,12 +1026,12 @@ def run_crawl_session(session_id: int):
                             exc_info=True
                         )
                         error_count += 1
-                        session.errors_count += 1
+                        session.errors_count = (session.errors_count or 0) + 1
                         db.commit()
                 
                 else:
                     error_count += 1
-                    session.errors_count += 1
+                    session.errors_count = (session.errors_count or 0) + 1
                     db.commit()
             
             # Mark as completed
@@ -1027,44 +1057,14 @@ def run_crawl_session(session_id: int):
             f"[Crawl {session_id}] Database error during crawl: {e}",
             exc_info=True
         )
-        
-        # Try to mark as failed (best effort)
-        try:
-            with get_db_context() as db:
-                session = db.query(CrawlSession).filter(
-                    CrawlSession.id == session_id
-                ).first()
-                if session:
-                    session.status = "failed"
-                    session.completed_at = datetime.now(timezone.utc)
-                    session.errors_count += 1
-        except Exception:
-            logger.error(
-                f"[Crawl {session_id}] Failed to mark session as failed",
-                exc_info=True
-            )
+        _mark_crawl_failed(session_id, "database_error")
     
     except Exception as e:
         logger.error(
             f"[Crawl {session_id}] Unexpected error during crawl: {e}",
             exc_info=True
         )
-        
-        # Try to mark as failed (best effort)
-        try:
-            with get_db_context() as db:
-                session = db.query(CrawlSession).filter(
-                    CrawlSession.id == session_id
-                ).first()
-                if session:
-                    session.status = "failed"
-                    session.completed_at = datetime.now(timezone.utc)
-                    session.errors_count += 1
-        except Exception:
-            logger.error(
-                f"[Crawl {session_id}] Failed to mark session as failed",
-                exc_info=True
-            )
+        _mark_crawl_failed(session_id, "unexpected_error")
     
     finally:
         # CRITICAL: Clean up resources

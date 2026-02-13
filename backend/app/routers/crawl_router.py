@@ -3,7 +3,7 @@ import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -27,17 +27,18 @@ class CrawlConfigRequest(BaseModel):
     policy_types: List[str] = Field(default_factory=list)
     keywords: List[str] = Field(default_factory=list, alias="keyword_filters")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)
 
-    @validator("seed_urls")
+    @field_validator("seed_urls")
+    @classmethod
     def validate_seed_urls(cls, v):
         for url in v:
             if not url.startswith(("http://", "https://")):
                 raise ValueError(f"Invalid URL: {url}")
         return v
 
-    @validator("keywords", pre=True)
+    @field_validator("keywords", mode="before")
+    @classmethod
     def validate_keywords(cls, v):
         if v is None:
             return []
@@ -65,8 +66,7 @@ class CrawlStatusResponse(BaseModel):
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ============================================================================

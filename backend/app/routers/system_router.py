@@ -16,6 +16,7 @@ class ResetResponse(BaseModel):
     status: str
     crawl_sessions_deleted: int
     documents_deleted: int
+    storage_items_deleted: int
     storage_directories_deleted: int
     message: str
 
@@ -50,13 +51,14 @@ def reset_system(
         status=result["status"],
         crawl_sessions_deleted=result["crawl_sessions_deleted"],
         documents_deleted=result["documents_deleted"],
-        storage_directories_deleted=result["storage_directories_deleted"],
+        storage_items_deleted=result["storage_items_deleted"],
+        storage_directories_deleted=result["storage_items_deleted"],
         message=f"System reset completed. Deleted {result['crawl_sessions_deleted']} crawl sessions, "
-                f"{result['documents_deleted']} documents, and {result['storage_directories_deleted']} storage items."
+                f"{result['documents_deleted']} documents, and {result['storage_items_deleted']} storage items."
     )
 
 
 @router.get("/health")
 def health_check():
     """Simple health check endpoint."""
-    return {"status": "healthy", "service": "PolicyCheck v5"}
+    return {"status": "healthy", "service": "PolicyCheck v6"}
