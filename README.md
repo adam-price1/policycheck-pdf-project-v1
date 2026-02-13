@@ -1,4 +1,4 @@
-# PolicyCheck v6 — Fixed & Production-Ready
+# PolicyCheck v6 
 
 ## Quick Start
 
