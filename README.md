@@ -3,7 +3,6 @@
 ## Quick Start
 
 ```bash
-# 1. Unzip and enter the project
 cd policycheck-fixed
 
 # 2. Start everything with Docker Compose
