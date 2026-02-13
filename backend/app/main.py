@@ -1,17 +1,21 @@
 """PolicyCheck v6 - Production-Hardened Ingestion Platform."""
 import asyncio
+import contextvars
 import logging
 import signal
 import sys
 import time
+import uuid
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, status
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from jose import JWTError, jwt
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.auth import validate_csrf_token
 from app.config import (
@@ -50,12 +54,29 @@ from app.routers import (
 # LOGGING
 # ============================================================================
 
+_request_id_ctx_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_id",
+    default="-",
+)
+
+
+class RequestIDLogFilter(logging.Filter):
+    """Inject request_id into every log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = _request_id_ctx_var.get("-")
+        return True
+
+
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
-    format=LOG_FORMAT,
+    format=f"{LOG_FORMAT} [request_id=%(request_id)s]",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+
+for handler in logging.getLogger().handlers:
+    handler.addFilter(RequestIDLogFilter())
 
 if IS_PRODUCTION:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -137,13 +158,50 @@ rate_limiter = InMemoryRateLimiter(
     cleanup_interval_seconds=API_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS,
 )
 
+API_V1_PREFIX = "/api/v1"
+LEGACY_API_PREFIX = "/api"
 CSRF_PROTECTED_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
 CSRF_EXEMPT_PATHS = {"/api/auth/login", "/api/auth/register"}
 CSRF_INVALID_MESSAGE = "CSRF token missing or invalid"
 
 
+def _request_path(request: Request) -> str:
+    """Read the current request path from the ASGI scope."""
+    return request.scope.get("path", request.url.path)
+
+
+def _to_legacy_api_path(path: str) -> str:
+    """Map /api/v1/* requests onto existing /api/* routes."""
+    if path == API_V1_PREFIX:
+        return LEGACY_API_PREFIX
+    if path.startswith(f"{API_V1_PREFIX}/"):
+        return f"{LEGACY_API_PREFIX}/{path[len(API_V1_PREFIX) + 1:]}"
+    return path
+
+
+def _is_versioned_api_path(path: str) -> bool:
+    """Return True for /api/v1 and /api/v1/* paths."""
+    return path == API_V1_PREFIX or path.startswith(f"{API_V1_PREFIX}/")
+
+
+def _is_legacy_api_path(path: str) -> bool:
+    """Return True for /api and /api/* paths."""
+    return path == LEGACY_API_PREFIX or path.startswith(f"{LEGACY_API_PREFIX}/")
+
+
+def _ensure_request_id(request: Request) -> str:
+    """Ensure request.state.request_id exists and return it."""
+    request_id = getattr(request.state, "request_id", None)
+    if request_id:
+        return request_id
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
+    return request_id
+
+
 def _is_rate_limit_exempt_path(path: str) -> bool:
     """Check if request path is exempt from API rate limiting."""
+    path = _to_legacy_api_path(path)
     for exempt_path in API_RATE_LIMIT_EXEMPT_PATHS:
         if path == exempt_path or path.startswith(f"{exempt_path}/"):
             return True
@@ -152,7 +210,7 @@ def _is_rate_limit_exempt_path(path: str) -> bool:
 
 def _is_csrf_exempt_path(path: str) -> bool:
     """Check if request path is exempt from CSRF validation."""
-    normalized_path = path.rstrip("/") or "/"
+    normalized_path = (_to_legacy_api_path(path).rstrip("/") or "/")
     return normalized_path in CSRF_EXEMPT_PATHS
 
 
@@ -282,12 +340,35 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def legacy_api_deprecation_middleware(request: Request, call_next):
+    """Support /api/v1 routes and warn for legacy /api route usage."""
+    path = _request_path(request)
+    request_id = _ensure_request_id(request)
+
+    if _is_versioned_api_path(path):
+        request.state.original_path = path
+        rewritten_path = _to_legacy_api_path(path)
+        request.scope["path"] = rewritten_path
+        request.scope["raw_path"] = rewritten_path.encode("utf-8")
+    elif _is_legacy_api_path(path):
+        logger.warning(
+            "Legacy API route used request_id=%s path=%s migrate_to=%s",
+            request_id,
+            path,
+            f"{API_V1_PREFIX}{path[len(LEGACY_API_PREFIX):]}",
+        )
+
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def csrf_middleware(request: Request, call_next):
     """Validate CSRF header on state-changing requests."""
+    path = _request_path(request)
     if request.method.upper() not in CSRF_PROTECTED_METHODS:
         return await call_next(request)
 
-    if _is_csrf_exempt_path(request.url.path):
+    if _is_csrf_exempt_path(path):
         return await call_next(request)
 
     csrf_token = request.headers.get("x-csrf-token")
@@ -307,13 +388,34 @@ async def csrf_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Generate and propagate a request identifier for every request."""
+
+    async def dispatch(self, request: Request, call_next):
+        request_id = _ensure_request_id(request)
+        token = _request_id_ctx_var.set(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            _request_id_ctx_var.reset(token)
+
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+# Add after CSRF middleware, before rate limiting.
+app.add_middleware(RequestIDMiddleware)
+
+
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     """Apply per-user/IP API rate limits and return 429 with Retry-After."""
+    path = _request_path(request)
+
     if not API_RATE_LIMIT_ENABLED:
         return await call_next(request)
 
-    if _is_rate_limit_exempt_path(request.url.path):
+    if _is_rate_limit_exempt_path(path):
         return await call_next(request)
 
     identity = _extract_authenticated_identity(request)
@@ -326,11 +428,13 @@ async def rate_limit_middleware(request: Request, call_next):
 
     allowed, retry_after = await rate_limiter.check_and_increment(rate_limit_key, limit)
     if not allowed:
+        request_id = _ensure_request_id(request)
         logger.warning(
-            "Rate limit exceeded key=%s method=%s path=%s retry_after=%s",
+            "Rate limit exceeded request_id=%s key=%s method=%s path=%s retry_after=%s",
+            request_id,
             rate_limit_key,
             request.method,
-            request.url.path,
+            path,
             retry_after,
         )
         return JSONResponse(
@@ -346,12 +450,50 @@ async def rate_limit_middleware(request: Request, call_next):
 # ROUTERS
 # ============================================================================
 
+# Keep legacy /api routes active for backward compatibility.
 app.include_router(auth_router.router)
 app.include_router(crawl_router.router)
 app.include_router(documents_router.router)
 app.include_router(system_router.router)
 app.include_router(stats_router.router)
 app.include_router(audit_router.router)
+
+
+def custom_openapi():
+    """
+    Expose versioned API paths in docs while keeping legacy aliases active.
+
+    Runtime routing supports both /api/* (legacy) and /api/v1/* (preferred).
+    Documentation shows only /api/v1/* for forward compatibility.
+    """
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=(
+            f"{app.description}\n\n"
+            "API versioning: use `/api/v1/*`. Legacy `/api/*` routes are still "
+            "supported temporarily and emit deprecation warnings."
+        ),
+        routes=app.routes,
+    )
+
+    remapped_paths = {}
+    for path, path_item in openapi_schema.get("paths", {}).items():
+        if path.startswith(f"{LEGACY_API_PREFIX}/"):
+            versioned_path = f"{API_V1_PREFIX}{path[len(LEGACY_API_PREFIX):]}"
+            remapped_paths[versioned_path] = path_item
+            continue
+        remapped_paths[path] = path_item
+
+    openapi_schema["paths"] = remapped_paths
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 # ============================================================================
 # ROOT ENDPOINTS

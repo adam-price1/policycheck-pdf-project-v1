@@ -7,6 +7,7 @@ FIXES APPLIED:
 3. init_db() now calls wait_for_db() before create_all()
 4. All connection attempts use proper timeout and retry semantics
 """
+import os
 import time
 import logging
 from contextlib import contextmanager
@@ -188,18 +189,25 @@ def init_db() -> None:
     """
     Initialize database tables.
 
-    Calls wait_for_db() first to ensure connectivity, then creates tables.
+    Calls wait_for_db() first to ensure connectivity.
+    If USE_ALEMBIC_MIGRATIONS=true, table creation is managed by Alembic.
     """
     # Step 1: ensure the database is reachable
     wait_for_db()
 
-    # Step 2: create tables
+    use_migrations = os.getenv("USE_ALEMBIC_MIGRATIONS", "false").lower() == "true"
+    if use_migrations:
+        logger.info("Migration mode enabled - run 'alembic upgrade head' manually")
+        logger.warning("Tables will NOT be auto-created. Use Alembic migrations.")
+        return
+
+    # Step 2: create tables directly (development mode)
     try:
         from app.models import Base
 
-        logger.info("Initializing database tables...")
+        logger.info("Creating database tables directly (development mode)")
         Base.metadata.create_all(bind=engine)
-        logger.info("Database tables initialized successfully")
+        logger.info("Database tables initialized")
 
         # Log table names
         table_names = list(Base.metadata.tables.keys())
