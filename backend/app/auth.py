@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -20,6 +21,9 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # HTTP Bearer token
 security = HTTPBearer()
+
+CSRF_TOKEN_SALT = "policycheck-csrf-token"
+csrf_serializer = URLSafeTimedSerializer(SECRET_KEY)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -69,6 +73,45 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     
     return encoded_jwt
+
+
+def create_csrf_token(subject: str, expires_delta: Optional[timedelta] = None) -> str:
+    """Create a stateless CSRF token signed with SECRET_KEY."""
+    if expires_delta is None:
+        expires_delta = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+
+    payload = {
+        "sub": subject,
+        "iat": int(datetime.now(timezone.utc).timestamp()),
+        "ttl": int(expires_delta.total_seconds()),
+    }
+    return csrf_serializer.dumps(payload, salt=CSRF_TOKEN_SALT)
+
+
+def validate_csrf_token(token: str, expected_subject: Optional[str] = None) -> bool:
+    """Validate CSRF token signature, expiration, and optional subject binding."""
+    max_age_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
+    try:
+        payload = csrf_serializer.loads(
+            token,
+            salt=CSRF_TOKEN_SALT,
+            max_age=max_age_seconds,
+        )
+    except (SignatureExpired, BadSignature):
+        return False
+
+    if not isinstance(payload, dict):
+        return False
+
+    token_subject = payload.get("sub")
+    if not token_subject:
+        return False
+
+    if expected_subject is not None and token_subject != expected_subject:
+        return False
+
+    return True
 
 
 def decode_token(token: str) -> dict:

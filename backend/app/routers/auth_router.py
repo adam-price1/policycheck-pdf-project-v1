@@ -10,6 +10,7 @@ from app.database import get_db
 from app.auth import (
     authenticate_user,
     create_access_token,
+    create_csrf_token,
     create_user,
     get_current_user,
     validate_password_strength,
@@ -54,6 +55,7 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     """Login response with JWT token."""
     access_token: str
+    csrf_token: str
     token_type: str
     user: dict
 
@@ -110,6 +112,7 @@ def login(
     
     # Create access token
     access_token = create_access_token(data={"sub": user.username})
+    csrf_token = create_csrf_token(subject=user.username)
     log_security_event(
         event_type="LOGIN_SUCCESS",
         username=user.username,
@@ -119,6 +122,7 @@ def login(
     
     return LoginResponse(
         access_token=access_token,
+        csrf_token=csrf_token,
         token_type="bearer",
         user={
             "id": user.id,

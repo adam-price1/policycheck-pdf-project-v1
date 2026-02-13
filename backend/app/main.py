@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from jose import JWTError, jwt
 
+from app.auth import validate_csrf_token
 from app.config import (
     ALGORITHM,
     API_RATE_LIMIT_ANONYMOUS_PER_MINUTE,
@@ -136,6 +137,10 @@ rate_limiter = InMemoryRateLimiter(
     cleanup_interval_seconds=API_RATE_LIMIT_CLEANUP_INTERVAL_SECONDS,
 )
 
+CSRF_PROTECTED_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+CSRF_EXEMPT_PATHS = {"/api/auth/login", "/api/auth/register"}
+CSRF_INVALID_MESSAGE = "CSRF token missing or invalid"
+
 
 def _is_rate_limit_exempt_path(path: str) -> bool:
     """Check if request path is exempt from API rate limiting."""
@@ -143,6 +148,12 @@ def _is_rate_limit_exempt_path(path: str) -> bool:
         if path == exempt_path or path.startswith(f"{exempt_path}/"):
             return True
     return False
+
+
+def _is_csrf_exempt_path(path: str) -> bool:
+    """Check if request path is exempt from CSRF validation."""
+    normalized_path = path.rstrip("/") or "/"
+    return normalized_path in CSRF_EXEMPT_PATHS
 
 
 def _client_ip(request: Request) -> str:
@@ -182,6 +193,25 @@ def _extract_authenticated_identity(request: Request) -> str | None:
         return str(subject)
 
     return None
+
+
+def _extract_authenticated_subject(request: Request) -> str | None:
+    """Extract JWT subject for CSRF token binding when available."""
+    auth_header = request.headers.get("authorization")
+    if not auth_header:
+        return None
+
+    scheme, _, token = auth_header.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        return None
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+
+    subject = payload.get("sub")
+    return str(subject) if subject is not None else None
 
 # ============================================================================
 # LIFESPAN
@@ -249,6 +279,32 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+
+@app.middleware("http")
+async def csrf_middleware(request: Request, call_next):
+    """Validate CSRF header on state-changing requests."""
+    if request.method.upper() not in CSRF_PROTECTED_METHODS:
+        return await call_next(request)
+
+    if _is_csrf_exempt_path(request.url.path):
+        return await call_next(request)
+
+    csrf_token = request.headers.get("x-csrf-token")
+    if not csrf_token:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": CSRF_INVALID_MESSAGE},
+        )
+
+    expected_subject = _extract_authenticated_subject(request)
+    if not validate_csrf_token(csrf_token, expected_subject=expected_subject):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={"detail": CSRF_INVALID_MESSAGE},
+        )
+
+    return await call_next(request)
 
 
 @app.middleware("http")
